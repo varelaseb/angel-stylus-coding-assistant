@@ -1,5 +1,11 @@
 from chroma_query import get_chroma_documents
 import re
+from urllib.parse import urlparse
+from research_contract import (
+    answer_contract_payload,
+    is_time_sensitive_query,
+    iso_date_today,
+)
 
 
 TOOL_QUERY_HINTS = {
@@ -64,6 +70,68 @@ CANONICAL_REFERENCES = [
     },
 ]
 
+GENERIC_QUERY_TOKENS = {
+    "http",
+    "https",
+    "www",
+    "com",
+    "org",
+    "io",
+    "net",
+    "github",
+    "gitlab",
+    "blob",
+    "tree",
+    "main",
+    "master",
+    "contracts",
+    "contract",
+    "solidity",
+    "stylus",
+    "and",
+    "the",
+    "for",
+    "with",
+    "from",
+    "into",
+    "this",
+    "that",
+    "what",
+    "when",
+    "where",
+    "which",
+    "about",
+    "your",
+    "their",
+    "analyze",
+    "analysis",
+    "return",
+    "verdict",
+    "porting",
+    "httpsgithubcom",
+}
+
+PORTING_ANCHOR_REFERENCES = [
+    {
+        "title": "Ed25519 signature recovery benchmark | LimeChain",
+        "url": "https://github.com/LimeChain/stylus-benchmark",
+        "source": "porting_anchor",
+        "section": "benchmarks",
+    },
+    {
+        "title": "stylus-benchmark",
+        "url": "https://github.com/Daniel-K-Ivanov/stylus-benchmark",
+        "source": "porting_anchor",
+        "section": "benchmarks",
+    },
+]
+
+UNISWAP_ANCHOR_REFERENCE = {
+    "title": "Unlocking DeFi Potential: How Stylus Fuels Uniswap Hook Innovation",
+    "url": "https://blog.arbitrum.io/uniswap-stylus-hooks/",
+    "source": "porting_anchor",
+    "section": "case studies",
+}
 
 def join_chunks_limited(chunks, max_chars=10000):
     combined = ""
@@ -72,6 +140,36 @@ def join_chunks_limited(chunks, max_chars=10000):
             break
         combined += chunk + "\n\n"
     return combined.strip()
+
+
+def extract_prompt_tokens(user_prompt: str):
+    prompt = user_prompt.lower()
+    tokens = set()
+
+    for tok in re.findall(r"[a-z0-9][a-z0-9_-]+", prompt):
+        for part in re.split(r"[_-]+", tok):
+            if len(part) < 3:
+                continue
+            if part in GENERIC_QUERY_TOKENS:
+                continue
+            if part.isdigit():
+                continue
+            tokens.add(part)
+
+    for raw_url in re.findall(r"https?://[^\s)>\]]+", prompt):
+        parsed = urlparse(raw_url)
+        candidate = f"{parsed.netloc} {parsed.path}".lower()
+        for tok in re.findall(r"[a-z0-9][a-z0-9_-]+", candidate):
+            for part in re.split(r"[_-]+", tok):
+                if len(part) < 3:
+                    continue
+                if part in GENERIC_QUERY_TOKENS:
+                    continue
+                if part.isdigit():
+                    continue
+                tokens.add(part)
+
+    return tokens
 
 
 def is_tool_query(user_prompt: str) -> bool:
@@ -139,6 +237,211 @@ def get_query_preferences(user_prompt: str, code_request: bool = False):
         "prefer_projects": wants_projects,
         "prefer_news": wants_news,
         "preferred_sections": preferred_sections,
+    }
+
+
+def is_official_reference_url(url: str) -> bool:
+    candidate = normalize_url(url).lower()
+    return (
+        "docs.arbitrum.io" in candidate
+        or "github.com/offchainlabs/" in candidate
+        or "offchainlabs.com" in candidate
+    )
+
+
+def infer_reference_source_type(reference: dict) -> str:
+    source = (reference.get("source") or "").lower()
+    url = reference.get("url") or ""
+
+    if source == "canonical":
+        return "canonical"
+    if source in {"documentation", "derived_docs_root"} or is_official_reference_url(url):
+        return "official"
+    return "community"
+
+
+def reference_domain(url: str) -> str:
+    candidate = normalize_url(url).lower()
+    without_scheme = re.sub(r"^https?://", "", candidate)
+    return without_scheme.split("/", 1)[0]
+
+
+def build_evidence_profile(references, max_items=20):
+    profile = {
+        "official_count": 0,
+        "community_count": 0,
+        "canonical_count": 0,
+        "unique_domains": 0,
+    }
+    domains = set()
+
+    for ref in references[:max_items]:
+        source_type = infer_reference_source_type(ref)
+        if source_type == "official":
+            profile["official_count"] += 1
+        elif source_type == "community":
+            profile["community_count"] += 1
+        elif source_type == "canonical":
+            profile["canonical_count"] += 1
+
+        domain = reference_domain(ref.get("url") or "")
+        if domain:
+            domains.add(domain)
+
+    profile["unique_domains"] = len(domains)
+    return profile
+
+
+def has_recency_signal(references, max_items=12):
+    for ref in references[:max_items]:
+        text = " ".join(
+            (
+                str(ref.get("title") or ""),
+                str(ref.get("description") or ""),
+                str(ref.get("url") or ""),
+            )
+        ).lower()
+        if re.search(r"\b20\d{2}\b", text):
+            return True
+        if any(token in text for token in ("release", "changelog", "update", "newsletter", "blog")):
+            return True
+    return False
+
+
+def token_overlap_score(user_prompt: str, references, max_items=8):
+    tokens = [tok for tok in re.findall(r"[a-z0-9]+", user_prompt.lower()) if len(tok) > 3]
+    if not tokens:
+        return 0
+
+    overlap_hits = 0
+    for ref in references[:max_items]:
+        searchable = " ".join(
+            (
+                str(ref.get("title") or ""),
+                str(ref.get("description") or ""),
+                str(ref.get("url") or ""),
+                str(ref.get("section") or ""),
+                str(ref.get("repo") or ""),
+            )
+        ).lower()
+        if any(tok in searchable for tok in tokens):
+            overlap_hits += 1
+    return overlap_hits
+
+
+def evaluate_confidence(user_prompt: str, references, evidence_profile, time_sensitive=False) -> str:
+    total_refs = len(references)
+    score = 0.0
+
+    if total_refs >= 3:
+        score += 1.0
+    if total_refs >= 6:
+        score += 0.6
+    if evidence_profile["official_count"] > 0:
+        score += 0.8
+    if evidence_profile["community_count"] > 0:
+        score += 0.7
+    if evidence_profile["canonical_count"] > 0:
+        score += 0.5
+    if evidence_profile["unique_domains"] >= 2:
+        score += 0.8
+
+    overlap_hits = token_overlap_score(user_prompt, references)
+    if overlap_hits >= 3:
+        score += 0.9
+    elif overlap_hits >= 1:
+        score += 0.4
+
+    if total_refs <= 1:
+        score -= 1.2
+    if time_sensitive and not has_recency_signal(references):
+        score -= 0.8
+
+    if score >= 3.0:
+        return "high"
+    if score >= 1.5:
+        return "medium"
+    return "low"
+
+
+def build_quality_signals(user_prompt: str, references, time_sensitive=False):
+    profile = build_evidence_profile(references)
+    confidence = evaluate_confidence(
+        user_prompt,
+        references,
+        evidence_profile=profile,
+        time_sensitive=time_sensitive,
+    )
+    return {
+        "confidence": confidence,
+        "time_sensitive": bool(time_sensitive),
+        "evidence_profile": profile,
+    }
+
+
+def build_outline_links(references, max_items=5):
+    links = []
+    for ref in references[:max_items]:
+        links.append(
+            {
+                "title": ref.get("title") or "Reference",
+                "url": ref.get("url") or "",
+                "source_type": infer_reference_source_type(ref),
+            }
+        )
+    return links
+
+
+def build_recommended_answer_outline(
+    *,
+    references,
+    quality_signals,
+    prefs,
+    as_of_date: str,
+    found: bool,
+):
+    links = build_outline_links(references)
+    why = [
+        "References are ranked for relevance and source quality to support fast implementation decisions.",
+    ]
+    caveats = []
+
+    if quality_signals["time_sensitive"]:
+        why.append(f"Time-sensitive query detected; verify release recency as of {as_of_date}.")
+
+    if quality_signals["confidence"] != "high":
+        why.append("Evidence is partial, so treat this as a best-bet recommendation.")
+        caveats.append("Confidence is not high; validate against current official sources before final adoption.")
+
+    if not found or not links:
+        direct_answer = (
+            "I could not find strong Stylus-specific references for this question. "
+            "Refine the prompt with a concrete tool, workflow, or repo to improve precision."
+        )
+        caveats.append("Retrieval context is insufficient for a high-confidence recommendation.")
+        return {
+            "direct_answer": direct_answer,
+            "why": why,
+            "links": links,
+            "caveats": caveats,
+        }
+
+    if prefs.get("prefer_tools"):
+        direct_answer = (
+            "Start with the top tooling references below; they are the most directly actionable for this request."
+        )
+    elif quality_signals["time_sensitive"]:
+        direct_answer = (
+            "Use the top references below as the current best sources, then confirm the latest release notes before execution."
+        )
+    else:
+        direct_answer = "The references below are the most relevant sources to answer this Stylus question."
+
+    return {
+        "direct_answer": direct_answer,
+        "why": why,
+        "links": links,
+        "caveats": caveats,
     }
 
 
@@ -360,6 +663,43 @@ def ensure_canonical_references(references, max_items=60):
     return refs
 
 
+def ensure_porting_anchor_references(references, user_prompt: str, max_items=60):
+    refs = list(references)
+    seen = {normalize_url(ref.get("url", "")) for ref in refs}
+    prompt_tokens = extract_prompt_tokens(user_prompt)
+
+    def append_anchor(anchor):
+        url = normalize_url(anchor["url"])
+        if url in seen:
+            return
+        if len(refs) >= max_items and refs:
+            dropped = refs.pop()
+            seen.discard(normalize_url(dropped.get("url", "")))
+        refs.append(anchor)
+        seen.add(url)
+
+    limechain_url = normalize_url(PORTING_ANCHOR_REFERENCES[0]["url"])
+    if limechain_url not in seen:
+        append_anchor(PORTING_ANCHOR_REFERENCES[0])
+
+    has_benchmark = any(
+        "benchmark" in ((ref.get("title") or "").lower() + " " + (ref.get("url") or "").lower())
+        for ref in refs
+    )
+    if not has_benchmark:
+        for anchor in PORTING_ANCHOR_REFERENCES[1:]:
+            append_anchor(anchor)
+            if len(refs) >= max_items:
+                return refs
+
+    if {"uniswap", "hook", "liquidity", "pool", "amm"} & prompt_tokens:
+        url = normalize_url(UNISWAP_ANCHOR_REFERENCE["url"])
+        if url not in seen:
+            append_anchor(UNISWAP_ANCHOR_REFERENCE)
+
+    return refs
+
+
 def build_tool_summary(hits, max_items=10):
     unique = {}
     for hit in hits:
@@ -381,9 +721,9 @@ def build_tool_summary(hits, max_items=10):
     return "\n".join(lines)
 
 
-def rank_references_for_prompt(references, user_prompt: str, prefs):
+def rank_references_for_prompt(references, user_prompt: str, prefs, porting_mode: bool = False):
     prompt = user_prompt.lower()
-    tokens = [tok for tok in re.findall(r"[a-z0-9]+", prompt) if len(tok) > 2]
+    tokens = extract_prompt_tokens(user_prompt)
 
     def ref_score(ref):
         score = 0.0
@@ -397,7 +737,7 @@ def rank_references_for_prompt(references, user_prompt: str, prefs):
 
         for tok in tokens:
             if tok in text:
-                score -= 0.2
+                score -= 0.35
 
         # Prefer ecosystem/community references over generic docs.
         if "github.com" in url:
@@ -428,6 +768,22 @@ def rank_references_for_prompt(references, user_prompt: str, prefs):
                 score -= 0.3
             if "github.com" in url or "gist.github.com" in url:
                 score -= 0.35
+
+        if porting_mode:
+            if source == "porting_anchor":
+                score -= 0.7
+            if any(k in text for k in ("benchmark", "gas", "speedup", "throughput", "performance")):
+                score -= 0.45
+            if "blog.arbitrum.io" in url or "case study" in text:
+                score -= 0.25
+            if "uniswap" in tokens and "uniswap" in text:
+                score -= 0.8
+            if "hook" in tokens and "hook" in text:
+                score -= 0.35
+            if "unit testing" in text or "e2e testing" in text:
+                score += 0.9
+            if source in {"canonical", "derived_docs_root"}:
+                score += 0.2
         return score
 
     return sorted(references, key=ref_score)
@@ -455,7 +811,11 @@ def build_references_markdown(references, max_items=12):
     return "\n".join(lines)
 
 
-def retrieve_stylus_context(user_prompt: str, max_chars: int = 10000):
+def retrieve_stylus_context(
+    user_prompt: str,
+    max_chars: int = 10000,
+    include_research_contract: bool = True,
+):
     """
     Retrieve relevant Stylus documentation context for a given user query.
 
@@ -464,8 +824,34 @@ def retrieve_stylus_context(user_prompt: str, max_chars: int = 10000):
     by an external LLM (IDE / MCP / user-selected model).
     """
     hits = get_chroma_documents(user_prompt)
+    as_of_date = iso_date_today()
+    time_sensitive = is_time_sensitive_query(user_prompt)
 
     if not hits:
+        if not include_research_contract:
+            return {
+                "found": False,
+                "context": "",
+                "reason": (
+                    "No relevant Stylus documentation was found for this query. "
+                    "The topic may be undocumented, outside Stylus scope, or the question may be too vague."
+                ),
+                "agent_guidance": AGENT_GUIDANCE,
+                "references": [],
+            }
+
+        quality_signals = build_quality_signals(
+            user_prompt,
+            references=[],
+            time_sensitive=time_sensitive,
+        )
+        recommended_answer_outline = build_recommended_answer_outline(
+            references=[],
+            quality_signals=quality_signals,
+            prefs={"prefer_tools": False},
+            as_of_date=as_of_date,
+            found=False,
+        )
         return {
             "found": False,
             "context": "",
@@ -473,6 +859,10 @@ def retrieve_stylus_context(user_prompt: str, max_chars: int = 10000):
                 "No relevant Stylus documentation was found for this query. "
                 "The topic may be undocumented, outside Stylus scope, or the question may be too vague."
             ),
+            "as_of_date": as_of_date,
+            "quality_signals": quality_signals,
+            "answer_contract": answer_contract_payload(),
+            "recommended_answer_outline": recommended_answer_outline,
             "agent_guidance": AGENT_GUIDANCE,
             "references": [],
         }
@@ -499,14 +889,27 @@ def retrieve_stylus_context(user_prompt: str, max_chars: int = 10000):
         )
 
     references = collect_references(ranked_hits, max_items=60)
-    references = rank_references_for_prompt(references, user_prompt, prefs)
+    if not include_research_contract:
+        references = ensure_porting_anchor_references(references, user_prompt, max_items=60)
+    references = rank_references_for_prompt(
+        references,
+        user_prompt,
+        prefs,
+        porting_mode=not include_research_contract,
+    )
+    evidence_references = list(references)
     references = ensure_canonical_references(references)
     references_markdown = build_references_markdown(references)
     ref_header = build_reference_header(references)
     if ref_header:
         context = f"{ref_header}\n\n{context}"
+    if include_research_contract and time_sensitive:
+        recency_note = (
+            f"Recency note: this appears time-sensitive. Validate current versions/releases as of {as_of_date}."
+        )
+        context = f"{recency_note}\n\n{context}"
 
-    return {
+    base_payload = {
         "found": True,
         "context": context,
         "chunks_used": len(ranked_hits),
@@ -515,3 +918,28 @@ def retrieve_stylus_context(user_prompt: str, max_chars: int = 10000):
         "references": references,
         "references_markdown": references_markdown,
     }
+    if not include_research_contract:
+        return base_payload
+
+    quality_signals = build_quality_signals(
+        user_prompt,
+        references=evidence_references,
+        time_sensitive=time_sensitive,
+    )
+    recommended_answer_outline = build_recommended_answer_outline(
+        references=references,
+        quality_signals=quality_signals,
+        prefs=prefs,
+        as_of_date=as_of_date,
+        found=True,
+    )
+
+    base_payload.update(
+        {
+            "as_of_date": as_of_date,
+            "quality_signals": quality_signals,
+            "answer_contract": answer_contract_payload(),
+            "recommended_answer_outline": recommended_answer_outline,
+        }
+    )
+    return base_payload

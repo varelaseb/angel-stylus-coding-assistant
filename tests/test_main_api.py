@@ -25,6 +25,10 @@ def test_skills_index_lists_supported_skills():
     assert "skills" in payload
     assert any(item["id"] == "sift-stylus-research" for item in payload["skills"])
     assert any(item["id"] == "sift-stylus-porting-auditor" for item in payload["skills"])
+    assert all(isinstance(item.get("system_prompt"), str) and item["system_prompt"] for item in payload["skills"])
+    assert all(item.get("prompt_source", "").endswith("agents/openai.yaml#default_prompt") for item in payload["skills"])
+    assert all(item.get("skill_doc_path", "").endswith("/SKILL.md") for item in payload["skills"])
+    assert all(len(item.get("behavior_hash", "")) == 64 for item in payload["skills"])
 
 
 def test_skill_search_rejects_unsupported_skill():
@@ -50,6 +54,34 @@ def test_stylus_chat_handles_internal_error_with_safe_response(monkeypatch):
     assert payload["references"] == []
     assert payload["agent_guidance"]["behavior"] == "references_first"
     assert payload["skill"] == "sift-stylus-research"
+    assert payload["answer_contract"]["format"] == "direct_answer_why_links"
+    assert payload["quality_signals"]["confidence"] == "low"
+    assert isinstance(payload["recommended_answer_outline"]["why"], list)
+    assert "as_of_date" in payload
+
+
+def test_execute_skill_search_success_payload_is_passthrough(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "run_skill_search",
+        lambda skill_id, _prompt: {
+            "found": True,
+            "context": "ok",
+            "references": [],
+            "skill": skill_id,
+            "custom": "value",
+        },
+    )
+    client = TestClient(app_module.app)
+    response = client.post("/skills/sift-stylus-research/search", json={"prompt": "latest tooling"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["skill"] == "sift-stylus-research"
+    assert payload["custom"] == "value"
+    assert "answer_contract" not in payload
+    assert "quality_signals" not in payload
+    assert "as_of_date" not in payload
 
 
 def test_porting_audit_alias_uses_porting_skill(monkeypatch):
@@ -63,6 +95,23 @@ def test_porting_audit_alias_uses_porting_skill(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["skill"] == "sift-stylus-porting-auditor"
+
+
+def test_porting_audit_internal_error_keeps_minimal_payload(monkeypatch):
+    def raise_error(_prompt):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_module, "run_skill_search", lambda _skill_id, _prompt: raise_error(_prompt))
+    client = TestClient(app_module.app)
+    response = client.post("/stylus-porting-audit", json={"prompt": "test"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["found"] is False
+    assert payload["skill"] == "sift-stylus-porting-auditor"
+    assert "answer_contract" not in payload
+    assert "quality_signals" not in payload
+    assert "as_of_date" not in payload
 
 
 def test_openrouter_proxy_requires_backend_api_key(monkeypatch):
@@ -108,3 +157,26 @@ def test_openrouter_proxy_passthrough_success(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert captured["json"]["model"] == "openai/gpt-4o-mini"
     assert captured["json"]["messages"][0]["content"] == "hello"
+
+
+def test_bootstrap_env_from_files_loads_missing_key(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENROUTER_API_KEY=file-key\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(app_module, "_iter_env_file_candidates", lambda: [env_file])
+
+    loaded = app_module.bootstrap_env_from_files()
+
+    assert str(env_file) in loaded
+    assert app_module.os.getenv("OPENROUTER_API_KEY") == "file-key"
+
+
+def test_bootstrap_env_from_files_does_not_override_existing(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENROUTER_API_KEY=file-key\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "runtime-key")
+    monkeypatch.setattr(app_module, "_iter_env_file_candidates", lambda: [env_file])
+
+    app_module.bootstrap_env_from_files()
+
+    assert app_module.os.getenv("OPENROUTER_API_KEY") == "runtime-key"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sift Stylus Code Helper"
+  short_description: "Implementation-focused Stylus guidance with references"
+  default_prompt: "Use $sift-stylus-code-helper for implementation-focused Stylus questions. Call the retrieval tool before final answers when evidence is needed, then provide practical debugging and architecture guidance with references-first output."

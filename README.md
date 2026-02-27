@@ -169,12 +169,13 @@ curl -X POST http://localhost:8001/openrouter/chat/completions \
 
 ## Codex Skills
 
-This repo contains two Codex skills under `skills/`:
+This repo contains Codex skills under `skills/`:
 
 - `sift-stylus-porting-auditor`
 - `sift-stylus-research`
+- `sift-stylus-code-helper`
 
-Install both from one CLI command:
+Install all from one CLI command:
 
 ```bash
 npx sift-stylus \

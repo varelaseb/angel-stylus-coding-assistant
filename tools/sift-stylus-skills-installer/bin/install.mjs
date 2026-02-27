@@ -5,7 +5,11 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const ALL_SKILLS = ["sift-stylus-porting-auditor", "sift-stylus-research"];
+const ALL_SKILLS = [
+  "sift-stylus-porting-auditor",
+  "sift-stylus-research",
+  "sift-stylus-code-helper",
+];
 
 function usage() {
   console.log(`Usage:

@@ -25,6 +25,7 @@ def test_skills_index_lists_supported_skills():
     assert "skills" in payload
     assert any(item["id"] == "sift-stylus-research" for item in payload["skills"])
     assert any(item["id"] == "sift-stylus-porting-auditor" for item in payload["skills"])
+    assert any(item["id"] == "sift-stylus-code-helper" for item in payload["skills"])
 
 
 def test_skill_search_rejects_unsupported_skill():

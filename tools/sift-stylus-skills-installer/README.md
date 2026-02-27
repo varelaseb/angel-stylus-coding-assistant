@@ -1,8 +1,9 @@
 # sift-stylus
 
-Installs the two Sift Codex skills:
+Installs the Sift Codex skills:
 - `sift-stylus-porting-auditor`
 - `sift-stylus-research`
+- `sift-stylus-code-helper`
 
 ## Quick install (both)
 

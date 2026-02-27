@@ -67,15 +67,42 @@ def test_porting_skill_disables_research_contract(monkeypatch):
     assert captured["include_research_contract"] is False
 
 
+def test_code_helper_skill_enables_research_contract(monkeypatch):
+    captured = {}
+
+    def fake_retrieve(prompt, include_research_contract=True, max_chars=10000):
+        captured["prompt"] = prompt
+        captured["include_research_contract"] = include_research_contract
+        captured["max_chars"] = max_chars
+        return {"found": True}
+
+    monkeypatch.setattr(skill_registry, "retrieve_stylus_context", fake_retrieve)
+
+    payload = skill_registry.run_skill_search(
+        skill_registry.SKILL_ID_CODE_HELPER,
+        "debug failing Stylus call",
+    )
+
+    assert payload["skill"] == skill_registry.SKILL_ID_CODE_HELPER
+    assert isinstance(payload["skill_system_prompt"], str)
+    assert payload["skill_system_prompt"]
+    assert len(payload["skill_behavior_hash"]) == 64
+    assert captured["prompt"] == "debug failing Stylus call"
+    assert captured["include_research_contract"] is True
+
+
 def test_published_prompt_is_source_of_truth():
     research = skill_registry.get_skill(skill_registry.SKILL_ID_RESEARCH)
     porting = skill_registry.get_skill(skill_registry.SKILL_ID_PORTING_AUDITOR)
+    code_helper = skill_registry.get_skill(skill_registry.SKILL_ID_CODE_HELPER)
 
     assert research is not None
     assert porting is not None
+    assert code_helper is not None
 
     assert research.system_prompt == _read_default_prompt(skill_registry.SKILL_ID_RESEARCH)
     assert porting.system_prompt == _read_default_prompt(skill_registry.SKILL_ID_PORTING_AUDITOR)
+    assert code_helper.system_prompt == _read_default_prompt(skill_registry.SKILL_ID_CODE_HELPER)
     assert "analysis_action_paths" in porting.system_prompt
     assert "llm_augmentation_contract" in porting.system_prompt
     assert "upside-first recommendation" in porting.system_prompt
